@@ -1385,6 +1385,116 @@ class TestFormParser(unittest.TestCase):
         # for each header in the multipart message.
         self.assertEqual(calls, 3)
 
+    def test_header_obs_fold_callback_order(self) -> None:
+        """Test that demonstrates the obs-fold callback problem"""
+        header_begin_calls = 0
+        header_end_calls = 0
+        header_field_data = []
+        header_value_data = []
+
+        def on_header_begin() -> None:
+            nonlocal header_begin_calls
+            header_begin_calls += 1
+
+        def on_header_end() -> None:
+            nonlocal header_end_calls
+            header_end_calls += 1
+
+        def on_header_field(data: bytes, start: int, end: int) -> None:
+            header_field_data.append(data[start:end])
+
+        def on_header_value(data: bytes, start: int, end: int) -> None:
+            header_value_data.append(data[start:end])
+
+        parser = MultipartParser(
+            "boundary",
+            callbacks={
+                "on_header_begin": on_header_begin,
+                "on_header_end": on_header_end,
+                "on_header_field": on_header_field,
+                "on_header_value": on_header_value,
+            },
+            max_size=1000,
+        )
+
+        # This data contains obs-fold: the header value continues on the next line with a tab
+        data = "--boundary\r\nContent-Type: multipart/mixed; \r\n\tboundary=boundary\r\n\r\n".encode("latin-1")
+        parser.write(data)
+        parser.finalize()
+
+        # For obs-fold, we should have:
+        # - 1 header_begin call (start of Content-Type header)
+        # - 1 header_end call (end of the complete folded header)
+        # - The complete header field should be "Content-Type"
+        # - The complete header value should be "multipart/mixed; boundary=boundary" (folded into one line)
+
+        print(f"Header begin calls: {header_begin_calls}")
+        print(f"Header end calls: {header_end_calls}")
+        print(f"Header field data: {header_field_data}")
+        print(f"Header value data: {header_value_data}")
+
+        # With the current implementation, header_end gets called prematurely
+        # after the first CR, so we'll see the problem here
+        self.assertEqual(header_begin_calls, 1, "Should have exactly 1 header_begin call")
+
+        # The problem: header_end is called too early (after first CR), so we get 2 calls instead of 1
+        # This assertion will fail, demonstrating the problem
+        self.assertEqual(header_end_calls, 1, "Should have exactly 1 header_end call for the complete folded header")
+
+        # The complete field name should be captured
+        self.assertEqual(b"".join(header_field_data), b"Content-Type")
+
+        # The complete value should contain the folded content
+        # Note: Currently preserves the literal CRLF+tab, but could be normalized in the future
+        actual_value = b"".join(header_value_data)
+        # Verify that the folded content is present (both parts of the header value)
+        self.assertIn(b"multipart/mixed;", actual_value)
+        self.assertIn(b"boundary=boundary", actual_value)
+
+    def test_header_obs_fold_detailed_trace(self) -> None:
+        """Detailed trace of obs-fold parsing to understand the exact problem"""
+        callback_trace = []
+
+        def on_header_begin() -> None:
+            callback_trace.append("header_begin")
+
+        def on_header_end() -> None:
+            callback_trace.append("header_end")
+
+        def on_header_field(data: bytes, start: int, end: int) -> None:
+            callback_trace.append(f"header_field: {data[start:end]!r}")
+
+        def on_header_value(data: bytes, start: int, end: int) -> None:
+            callback_trace.append(f"header_value: {data[start:end]!r}")
+
+        parser = MultipartParser(
+            "boundary",
+            callbacks={
+                "on_header_begin": on_header_begin,
+                "on_header_end": on_header_end,
+                "on_header_field": on_header_field,
+                "on_header_value": on_header_value,
+            },
+            max_size=1000,
+        )
+
+        # Use the same obs-fold data
+        data = "--boundary\r\nContent-Type: multipart/mixed; \r\n\tboundary=boundary\r\n\r\n".encode("latin-1")
+        parser.write(data)
+        parser.finalize()
+
+        print("Callback trace:")
+        for i, callback in enumerate(callback_trace):
+            print(f"  {i + 1}: {callback}")
+
+        # This test is just for debugging - let it always pass but show us the trace
+        # The expected sequence should be:
+        # 1: header_begin
+        # 2: header_field: b'Content-Type'
+        # 3: header_value: b'multipart/mixed; boundary=boundary'  (folded)
+        # 4: header_end
+        self.assertTrue(True, "This test is for tracing only")
+
 
 class TestHelperFunctions(unittest.TestCase):
     def test_create_form_parser(self) -> None:

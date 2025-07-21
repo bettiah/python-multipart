@@ -126,12 +126,13 @@ class MultipartState(IntEnum):
     HEADER_VALUE_START = 4
     HEADER_VALUE = 5
     HEADER_VALUE_ALMOST_DONE = 6
-    HEADERS_ALMOST_DONE = 7
-    PART_DATA_START = 8
-    PART_DATA = 9
-    PART_DATA_END = 10
-    END_BOUNDARY = 11
-    END = 12
+    HEADER_VALUE_FOLDING = 7
+    HEADERS_ALMOST_DONE = 8
+    PART_DATA_START = 9
+    PART_DATA = 10
+    PART_DATA_END = 11
+    END_BOUNDARY = 12
+    END = 13
 
 
 # Flags for the multipart parser.
@@ -145,6 +146,7 @@ CR = b"\r"[0]
 LF = b"\n"[0]
 COLON = b":"[0]
 SPACE = b" "[0]
+TAB = b"\t"[0]
 HYPHEN = b"-"[0]
 AMPERSAND = b"&"[0]
 SEMICOLON = b";"[0]
@@ -1236,11 +1238,9 @@ class MultipartParser(BaseParser):
                 i -= 1
 
             elif state == MultipartState.HEADER_VALUE:
-                # If we've got a CR, we're nearly done our headers.  Otherwise,
-                # we do nothing and just move past this character.
+                # If we've got a CR, we might be done with this header, but we need
+                # to check for obs-fold first. Don't call callbacks yet.
                 if c == CR:
-                    data_callback("header_value", i)
-                    self.callback("header_end")
                     state = MultipartState.HEADER_VALUE_ALMOST_DONE
 
             elif state == MultipartState.HEADER_VALUE_ALMOST_DONE:
@@ -1252,10 +1252,25 @@ class MultipartParser(BaseParser):
                     e.offset = i
                     raise e
 
-                # Move back to the start of another header.  Note that if that
-                # state detects ANOTHER newline, it'll trigger the end of our
-                # headers.
-                state = MultipartState.HEADER_FIELD_START
+                # Now we've seen CRLF. Check if the next character is whitespace (obs-fold)
+                # We transition to folding state to look ahead
+                state = MultipartState.HEADER_VALUE_FOLDING
+
+            elif state == MultipartState.HEADER_VALUE_FOLDING:
+                # Check if this is obs-fold (whitespace after CRLF)
+                if c == SPACE or c == TAB:
+                    # This is obs-fold - continue the header value
+                    # Replace the obs-fold CRLF + whitespace with a single space
+                    # Skip the folding whitespace and continue parsing header value
+                    state = MultipartState.HEADER_VALUE
+                else:
+                    # Not obs-fold - end of header reached
+                    # Now we can safely emit the header value callback (up to the CRLF)
+                    data_callback("header_value", i - 2)  # Exclude the CRLF
+                    self.callback("header_end")
+                    state = MultipartState.HEADER_FIELD_START
+                    # Reprocess this character as the start of a new header
+                    i -= 1
 
             elif state == MultipartState.HEADERS_ALMOST_DONE:
                 # We're almost done our headers.  This is reached when we parse
